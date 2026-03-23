@@ -34,7 +34,7 @@ use smallvec::SmallVec;
 use crate::{
 	AsPointer,
 	environment::Environment,
-	error::{Error, ErrorCode, Result, status_to_result},
+	error::{Error, ErrorCode, Result},
 	memory::Allocator,
 	ortsys,
 	util::{AllocatedString, STACK_SESSION_INPUTS, STACK_SESSION_OUTPUTS, with_cstr, with_cstr_ptr_array},
@@ -75,10 +75,9 @@ pub use self::{
 pub struct SharedSessionInner {
 	session_ptr: NonNull<ort_sys::OrtSession>,
 	pub(crate) allocator: Allocator,
-	_initializers: SmallVec<[Arc<DynValue>; 4]>,
 	/// Additional things we may need to hold onto for the duration of this session, like `OperatorDomain`s and
 	/// DLL handles for operator libraries.
-	_extras: SmallVec<[Box<dyn Any>; 4]>,
+	_extras: SmallVec<[Arc<dyn Any>; 4]>,
 	_environment: Arc<Environment>
 }
 
@@ -357,6 +356,8 @@ impl Session {
 		binding: &'b IoBinding,
 		run_options: Option<&'r RunOptions<NoSelectedOutputs>>
 	) -> Result<SessionOutputs<'b>> {
+		use crate::util::run_on_drop;
+
 		let run_options_ptr = if let Some(run_options) = run_options { run_options.ptr() } else { ptr::null() };
 		ortsys![unsafe RunWithBinding(self.inner.ptr().cast_mut(), run_options_ptr, binding.ptr())?];
 
@@ -365,15 +366,15 @@ impl Session {
 			let mut output_values_ptr: *mut *mut ort_sys::OrtValue = ptr::null_mut();
 			ortsys![unsafe GetBoundOutputValues(binding.ptr(), self.inner.allocator.ptr().cast_mut(), &mut output_values_ptr, &mut count)?; nonNull(output_values_ptr)];
 
+			let _guard = run_on_drop(|| unsafe {
+				self.inner.allocator.free(output_values_ptr.as_ptr());
+			});
 			let output_values = unsafe { slice::from_raw_parts(output_values_ptr.as_ptr(), count) }
 				.iter()
 				.map(|ptr| unsafe {
 					DynValue::from_ptr(NonNull::new(*ptr).expect("OrtValue ptrs returned by GetBoundOutputValues should not be null"), Some(self.inner()))
 				})
 				.collect();
-			unsafe {
-				self.inner.allocator.free(output_values_ptr.as_ptr());
-			}
 
 			Ok(SessionOutputs::new(binding.output_values.iter().map(|(k, _)| k.as_str()).collect(), output_values))
 		} else {
@@ -574,7 +575,7 @@ impl Session {
 			)
 		]
 		.await;
-		unsafe { crate::error::status_to_result(status) }?;
+		unsafe { Error::result_from_status(status) }?;
 
 		let outputs = output_tensors
 			.into_iter()
@@ -707,7 +708,7 @@ pub(crate) mod io {
 	) -> Result<usize> {
 		let mut num_nodes = 0;
 		let status = unsafe { f(session_ptr.as_ptr(), &mut num_nodes) };
-		unsafe { status_to_result(status) }?;
+		unsafe { Error::result_from_status(status) }?;
 		Ok(num_nodes)
 	}
 
@@ -720,7 +721,7 @@ pub(crate) mod io {
 		let mut name_ptr: *mut c_char = ptr::null_mut();
 
 		let status = unsafe { f(session_ptr.as_ptr(), i, allocator.ptr().cast_mut(), &mut name_ptr) };
-		unsafe { status_to_result(status) }?;
+		unsafe { Error::result_from_status(status) }?;
 		if name_ptr.is_null() {
 			crate::util::cold();
 			return Err(crate::Error::new("expected `name_ptr` to not be null"));
@@ -737,7 +738,7 @@ pub(crate) mod io {
 		let mut typeinfo_ptr: *mut ort_sys::OrtTypeInfo = ptr::null_mut();
 
 		let status = unsafe { f(session_ptr.as_ptr(), i, &mut typeinfo_ptr) };
-		unsafe { status_to_result(status) }?;
+		unsafe { Error::result_from_status(status) }?;
 		let Some(typeinfo_ptr) = NonNull::new(typeinfo_ptr) else {
 			crate::util::cold();
 			return Err(crate::Error::new("expected `typeinfo_ptr` to not be null"));

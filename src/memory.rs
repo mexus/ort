@@ -342,7 +342,7 @@ impl From<ort_sys::OrtMemType> for MemoryType {
 pub enum DeviceType {
 	CPU,
 	GPU,
-	FPGA
+	NPU
 }
 
 impl From<DeviceType> for ort_sys::OrtMemoryInfoDeviceType {
@@ -350,7 +350,7 @@ impl From<DeviceType> for ort_sys::OrtMemoryInfoDeviceType {
 		match value {
 			DeviceType::CPU => ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU,
 			DeviceType::GPU => ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU,
-			DeviceType::FPGA => ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_FPGA
+			DeviceType::NPU => ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_FPGA
 		}
 	}
 }
@@ -360,7 +360,7 @@ impl From<ort_sys::OrtMemoryInfoDeviceType> for DeviceType {
 		match value {
 			ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU => DeviceType::CPU,
 			ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU => DeviceType::GPU,
-			ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_FPGA => DeviceType::FPGA
+			ort_sys::OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_FPGA => DeviceType::NPU
 		}
 	}
 }
@@ -426,7 +426,7 @@ impl MemoryInfo {
 
 	// All getter functions are (at least currently) infallible - they simply just dereference the corresponding fields,
 	// and always return `nullptr` for the status; so none of these have to return `Result`s.
-	// https://github.com/microsoft/onnxruntime/blob/v1.24.1/onnxruntime/core/framework/allocator.cc#L330
+	// https://github.com/microsoft/onnxruntime/blob/v1.24.4/onnxruntime/core/framework/allocator.cc#L342
 
 	/// Returns the [`MemoryType`] described by this struct.
 	/// ```

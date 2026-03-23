@@ -328,12 +328,13 @@ macro_rules! impl_to_shape {
 				.iter()
 				.enumerate()
 				.map(|(i, c)| {
-					if *c >= 1 {
+					#[allow(unused_comparisons)]
+					if *c >= 0 {
 						Ok(*c as i64)
 					} else {
 						Err(Error::new_with_code(
 							ErrorCode::InvalidArgument,
-							format!("Invalid dimension #{}; all dimensions must be >= 1 when creating a tensor from raw data", i + 1)
+							format!("Invalid dimension #{}; all dimensions must be >= 0 when creating a tensor from raw data", i + 1)
 						))
 					}
 				})
@@ -343,7 +344,7 @@ macro_rules! impl_to_shape {
 					Err(Error::new_with_code(
 						ErrorCode::InvalidArgument,
 						format!(
-							"Cannot create a tensor from raw data; shape {:?} ({} elements) is larger than the length of the data provided ({} elements)",
+							"Cannot create a tensor from raw data; shape {:?} ({} elements) is different from the length of the data provided ({} elements)",
 							v,
 							v.num_elements(),
 							expected_size

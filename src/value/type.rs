@@ -182,8 +182,15 @@ impl ValueType {
 				let _guard = util::run_on_drop(|| ortsys![unsafe ReleaseTensorTypeAndShapeInfo(tensor_type_info)]);
 				ortsys![@editor: unsafe CreateTensorTypeInfo(tensor_type_info, &mut info_ptr)?];
 			}
-			Self::Map { .. } => {
-				todo!();
+			Self::Map { key, value } => {
+				let value_type_info = ValueType::Tensor {
+					ty: *value,
+					shape: Shape::new([-1]),
+					dimension_symbols: SymbolicDimensions::empty(1)
+				}
+				.to_type_info()?;
+				let _guard = util::run_on_drop(|| ortsys![unsafe ReleaseTypeInfo(value_type_info)]);
+				ortsys![@editor: unsafe CreateMapTypeInfo((*key).into(), value_type_info, &mut info_ptr)?];
 			}
 			Self::Sequence(ty) => {
 				let el_type = ty.to_type_info()?;
@@ -294,12 +301,44 @@ impl fmt::Display for ValueType {
 #[derive(Debug)]
 pub struct Outlet {
 	name: String,
-	dtype: ValueType
+	dtype: ValueType,
+	// Outlet is used for many things, but a ValueInfo can only be created if the Model Editor API is available, which it sometimes may not be.
+	value_info: Option<NonNull<ort_sys::OrtValueInfo>>,
+	drop: bool
 }
 
 impl Outlet {
 	pub fn new<S: Into<String>>(name: S, dtype: ValueType) -> Self {
-		Self { name: name.into(), dtype }
+		let name = name.into();
+		let value_info = Self::make_value_info(&name, &dtype);
+		Self {
+			name,
+			dtype,
+			value_info,
+			drop: value_info.is_some()
+		}
+	}
+
+	#[cfg(feature = "api-22")]
+	pub(crate) unsafe fn from_raw(raw: NonNull<ort_sys::OrtValueInfo>, drop: bool) -> Result<Self> {
+		let mut name = ptr::null();
+		ortsys![unsafe GetValueInfoName(raw.as_ptr(), &mut name)?];
+		let name = if !name.is_null() {
+			unsafe { CStr::from_ptr(name) }.to_str().map_or_else(|_| String::new(), str::to_string)
+		} else {
+			String::new()
+		};
+
+		let mut type_info = ptr::null();
+		ortsys![unsafe GetValueInfoTypeInfo(raw.as_ptr(), &mut type_info)?; nonNull(type_info)];
+		let dtype = unsafe { ValueType::from_type_info(type_info) };
+
+		Ok(Self {
+			name,
+			dtype,
+			value_info: Some(raw),
+			drop
+		})
 	}
 
 	#[inline]
@@ -313,23 +352,43 @@ impl Outlet {
 	}
 
 	#[cfg(feature = "api-22")]
-	pub(crate) fn into_editor_value_info(self) -> Result<NonNull<ort_sys::OrtValueInfo>> {
-		let type_info = self.dtype.to_type_info()?;
+	pub(crate) fn make_value_info(name: &str, dtype: &ValueType) -> Option<NonNull<ort_sys::OrtValueInfo>> {
+		let type_info = dtype.to_type_info().ok()?;
 		let _guard = run_on_drop(|| ortsys![unsafe ReleaseTypeInfo(type_info)]);
 
-		let ptr = with_cstr(self.name.as_bytes(), &|name| {
+		with_cstr(name.as_bytes(), &|name| {
 			let mut ptr: *mut ort_sys::OrtValueInfo = ptr::null_mut();
 			ortsys![@editor: unsafe CreateValueInfo(name.as_ptr(), type_info, &mut ptr)?; nonNull(ptr)];
 			Ok(ptr)
-		})?;
-		Ok(ptr)
+		})
+		.ok()
+	}
+
+	#[cfg(not(feature = "api-22"))]
+	pub(crate) fn make_value_info(_name: &str, _dtype: &ValueType) -> Option<NonNull<ort_sys::OrtValueInfo>> {
+		None
+	}
+
+	#[inline]
+	pub(crate) fn into_value_info_ptr(mut self) -> Option<NonNull<ort_sys::OrtValueInfo>> {
+		let value_info = self.value_info;
+		self.drop = false;
+		value_info
+	}
+}
+
+impl Drop for Outlet {
+	fn drop(&mut self) {
+		#[cfg(feature = "api-22")]
+		if self.drop {
+			ortsys![unsafe ReleaseValueInfo(self.value_info.expect("OrtValueInfo should not be null").as_ptr())];
+		}
 	}
 }
 
 pub(crate) unsafe fn extract_data_type_from_tensor_info(info_ptr: NonNull<ort_sys::OrtTensorTypeAndShapeInfo>) -> ValueType {
 	let mut type_sys = ort_sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
 	ortsys![unsafe GetTensorElementType(info_ptr.as_ptr(), &mut type_sys).expect("infallible")];
-	assert_ne!(type_sys, ort_sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED);
 	// This transmute should be safe since its value is read from GetTensorElementType, which we must trust
 	let mut num_dims = 0;
 	ortsys![unsafe GetDimensionsCount(info_ptr.as_ptr(), &mut num_dims).expect("infallible")];
@@ -386,7 +445,7 @@ mod tests {
 	};
 
 	#[test]
-	fn test_to_from_tensor_info() -> crate::Result<()> {
+	fn test_tensor_to_from_tensor_info() -> crate::Result<()> {
 		let ty = ValueType::Tensor {
 			ty: TensorElementType::Float32,
 			shape: Shape::new([-1, 32, 4, 32]),
@@ -396,6 +455,71 @@ mod tests {
 		let ty_d = unsafe { super::extract_data_type_from_tensor_info(ty_ptr) };
 		ortsys![unsafe ReleaseTensorTypeAndShapeInfo(ty_ptr.as_ptr())];
 		assert_eq!(ty, ty_d);
+
+		Ok(())
+	}
+
+	#[test]
+	#[cfg(feature = "api-22")]
+	fn test_tensor_to_from_type_info() -> crate::Result<()> {
+		let ty = ValueType::Tensor {
+			ty: TensorElementType::Float16,
+			shape: Shape::new([1, 3, 224, 224]),
+			dimension_symbols: SymbolicDimensions::new([String::from("test1"), String::default(), String::default(), String::default()])
+		};
+		let ty_ptr = NonNull::new(ty.to_type_info()?).expect("");
+		let ty2 = unsafe { ValueType::from_type_info(ty_ptr) };
+		assert_eq!(ty, ty2);
+		assert!(ty2.is_tensor());
+		assert_eq!(format!("{ty2}"), "Tensor<f16>(1, 3, 224, 224)".to_string());
+
+		Ok(())
+	}
+
+	#[test]
+	#[cfg(feature = "api-22")]
+	fn test_map_to_from_type_info() -> crate::Result<()> {
+		let ty = ValueType::Map {
+			key: TensorElementType::Float32,
+			value: TensorElementType::String
+		};
+		let ty_ptr = NonNull::new(ty.to_type_info()?).expect("");
+		let ty2 = unsafe { ValueType::from_type_info(ty_ptr) };
+		assert_eq!(ty, ty2);
+		assert!(ty2.is_map());
+		assert_eq!(format!("{ty2}"), "Map<f32, String>".to_string());
+
+		Ok(())
+	}
+
+	#[test]
+	#[cfg(feature = "api-22")]
+	fn test_sequence_to_from_type_info() -> crate::Result<()> {
+		let ty = ValueType::Sequence(Box::new(ValueType::Tensor {
+			ty: TensorElementType::Float16,
+			shape: Shape::new([1, 3, 224, 224]),
+			dimension_symbols: SymbolicDimensions::new([String::from("test1"), String::default(), String::default(), String::default()])
+		}));
+		let ty_ptr = NonNull::new(ty.to_type_info()?).expect("");
+		let ty2 = unsafe { ValueType::from_type_info(ty_ptr) };
+		assert_eq!(ty, ty2);
+		assert!(ty2.is_sequence());
+		assert_eq!(format!("{ty2}"), "Sequence<Tensor<f16>(1, 3, 224, 224)>".to_string());
+
+		Ok(())
+	}
+
+	#[test]
+	#[cfg(feature = "api-22")]
+	fn test_all_type_info() -> crate::Result<()> {
+		let ty = ValueType::Optional(Box::new(ValueType::Sequence(Box::new(ValueType::Tensor {
+			ty: TensorElementType::Float16,
+			shape: Shape::new([1, 3, 224, 224]),
+			dimension_symbols: SymbolicDimensions::empty(4)
+		}))));
+		let ty_ptr = NonNull::new(ty.to_type_info()?).expect("");
+		let ty2 = unsafe { ValueType::from_type_info(ty_ptr) };
+		assert_eq!(ty, ty2);
 
 		Ok(())
 	}

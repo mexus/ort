@@ -22,7 +22,7 @@
 //! # use std::path::PathBuf;
 //! # use ort::{compiler::ModelCompiler, session::Session, ep};
 //! # fn main() -> ort::Result<()> {
-//! let session_options = Session::builder()?.with_execution_providers([ep::CoreML::default()
+//! let mut session_options = Session::builder()?.with_execution_providers([ep::CoreML::default()
 //! 	.with_model_format(ep::coreml::ModelFormat::MLProgram)
 //! 	.build()])?;
 //!
@@ -231,5 +231,22 @@ impl Drop for CompiledModel {
 	fn drop(&mut self) {
 		unsafe { self.allocator.free(self.ptr) };
 		crate::logging::drop!(CompiledModel, self.ptr);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::{compiler::ModelCompiler, session::builder::SessionBuilder};
+
+	#[test]
+	fn test_compile_in_memory() -> crate::Result<()> {
+		let compiled_model = ModelCompiler::new(SessionBuilder::new()?)?
+			.with_embed_ep_context()?
+			.with_model_from_file("tests/data/upsample.onnx")?
+			.compile_to_buffer()?;
+
+		let _model = SessionBuilder::new()?.commit_from_memory(&compiled_model)?;
+
+		Ok(())
 	}
 }

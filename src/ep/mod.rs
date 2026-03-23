@@ -15,6 +15,8 @@
 //! ```
 
 use alloc::{ffi::CString, string::ToString, sync::Arc, vec::Vec};
+#[cfg(feature = "api-22")]
+use alloc::{string::String, sync::Weak};
 use core::{
 	any::Any,
 	ffi::c_char,
@@ -22,6 +24,8 @@ use core::{
 	ptr
 };
 
+#[cfg(feature = "api-22")]
+use crate::environment::Environment;
 use crate::{
 	error::Result,
 	ortsys,
@@ -62,7 +66,9 @@ pub mod armnn;
 pub use self::armnn::ArmNN;
 pub mod migraphx;
 pub use self::migraphx::MIGraphX;
+#[cfg(feature = "api-18")]
 pub mod vitis;
+#[cfg(feature = "api-18")]
 pub use self::vitis::Vitis;
 pub mod rknpu;
 pub use self::rknpu::RKNPU;
@@ -389,6 +395,37 @@ fn is_ep_available(name: &str) -> Result<bool> {
 	Ok(false)
 }
 
+/// Handle to a loaded execution provider library, obtained from [`Environment::register_ep_library`].
+#[cfg(feature = "api-22")]
+#[cfg_attr(docsrs, doc(cfg(feature = "api-22")))]
+pub struct ExecutionProviderLibrary {
+	name: String,
+	env: Weak<Environment>
+}
+
+#[cfg(feature = "api-22")]
+impl ExecutionProviderLibrary {
+	pub(crate) fn new(name: impl Into<String>, env: &Arc<Environment>) -> Self {
+		Self {
+			name: name.into(),
+			env: Arc::downgrade(env)
+		}
+	}
+
+	/// Unregister the EP library from the environment.
+	#[cfg_attr(docsrs, doc(cfg(feature = "api-22")))]
+	pub fn unregister(self) -> Result<()> {
+		if let Some(env) = self.env.upgrade() {
+			use crate::AsPointer;
+			crate::util::with_cstr(self.name.as_bytes(), &|name| {
+				ortsys![unsafe UnregisterExecutionProviderLibrary(env.ptr().cast_mut(), name.as_ptr())?];
+				Ok(())
+			})?;
+		}
+		Ok(())
+	}
+}
+
 #[deprecated = "import `ort::ep::ACL` instead"]
 #[doc(hidden)]
 pub use self::acl::ACL as ACLExecutionProvider;
@@ -444,6 +481,7 @@ pub use self::tensorrt::TensorRT as TensorRTExecutionProvider;
 #[deprecated = "import `ort::ep::TVM` instead"]
 #[doc(hidden)]
 pub use self::tvm::TVM as TVMExecutionProvider;
+#[cfg(feature = "api-18")]
 #[deprecated = "import `ort::ep::Vitis` instead"]
 #[doc(hidden)]
 pub use self::vitis::Vitis as VitisAIExecutionProvider;
